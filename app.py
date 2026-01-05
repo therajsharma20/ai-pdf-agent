@@ -1,77 +1,76 @@
-import os
 import streamlit as st
-import tempfile
+import os
 
-# --- 1. SETUP PAGE ---
-st.set_page_config(page_title="My Local AI Agent", page_icon="🤖")
-st.title("🤖 Chat with ANY PDF (Running Locally)")
+# --- PAGE SETUP ---
+st.set_page_config(page_title="My AI Agent", page_icon="🤖")
+st.title("🤖 Chat with PDF")
 
-# --- 2. SIDEBAR FOR API KEY ---
+# --- IMPORT CHECK (To prove libraries are working) ---
+try:
+    from langchain_groq import ChatGroq
+    from langchain_community.document_loaders import PyPDFLoader
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    from langchain_community.embeddings import HuggingFaceEmbeddings
+    from langchain_chroma import Chroma
+    from langchain.chains import RetrievalQA
+    print("✅ All libraries imported successfully!")
+except ImportError as e:
+    st.error(f"❌ Library Error: {e}")
+    st.error("Did you run the 'pip install' command in cmd?")
+    st.stop()
+
+# --- SIDEBAR ---
 with st.sidebar:
-    st.header("⚙️ Settings")
-    # We let you paste the key in the browser so it's safe
-    groq_api_key = st.text_input("Groq API Key", type="password", placeholder="gsk_...")
+    st.header("Settings")
+    # Link to get the key if you forgot it
+    st.markdown("[Get your Groq API Key](https://console.groq.com/keys)")
+    api_key = st.text_input("Groq API Key", type="password")
+    uploaded_file = st.file_uploader("Upload PDF", type="pdf")
+
+# --- MAIN LOGIC ---
+if api_key and uploaded_file:
+    os.environ["GROQ_API_KEY"] = api_key
     
-    # Upload File
-    uploaded_file = st.file_uploader("Upload a PDF", type=["pdf"])
+    # Check if we have already processed this specific file
+    if "vectors" not in st.session_state:
+        st.info("⏳ Processing PDF... please wait.")
+        
+        # Save the uploaded file temporarily
+        with open("temp.pdf", "wb") as f:
+            f.write(uploaded_file.getbuffer())
+            
+        # Load and Split the PDF
+        loader = PyPDFLoader("temp.pdf")
+        docs = loader.load()
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        splits = text_splitter.split_documents(docs)
+        
+        # Create the AI Brain (Embeddings)
+        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        
+        # Store in Database (ChromaDB)
+        vector_store = Chroma.from_documents(documents=splits, embedding=embeddings)
+        
+        # Save to session so we don't reload it every time
+        st.session_state.vectors = vector_store
+        st.success("PDF Processed! You can ask questions now.")
+        st.rerun()
 
-# --- 3. MAIN LOGIC ---
-if groq_api_key and uploaded_file:
-    # Set the key
-    os.environ["GROQ_API_KEY"] = groq_api_key
+# --- CHAT INTERFACE ---
+if "vectors" in st.session_state:
+    user_question = st.text_input("Ask a question about the PDF:")
     
-    # Save uploaded file temporarily so the Agent can read it
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
-        tmp_file.write(uploaded_file.getvalue())
-        tmp_path = tmp_file.name
-
-    st.success("✅ File Uploaded! AI is ready.")
-
-    # --- CHAT INTERFACE ---
-    user_query = st.text_input("Ask a question about your PDF:")
-
-    if user_query:
-        with st.spinner("Thinking... (This might take 5 seconds)"):
-            try:
-                # --- LAZY IMPORT (Only loads when needed) ---
-                from langchain_groq import ChatGroq
-                from langchain_community.document_loaders import PyPDFLoader
-                from langchain_text_splitters import RecursiveCharacterTextSplitter
-                from langchain_huggingface import HuggingFaceEmbeddings
-                from langchain_chroma import Chroma
-                from langchain_core.tools import tool
-                from langgraph.prebuilt import create_react_agent
-
-                # 1. Load & Split
-                loader = PyPDFLoader(tmp_path)
-                docs = loader.load()
-                text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-                splits = text_splitter.split_documents(docs)
-
-                # 2. Embed (This uses the model you just downloaded)
-                embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-                vectorstore = Chroma.from_documents(documents=splits, embedding=embedding_model)
-                retriever = vectorstore.as_retriever()
-
-                # 3. Tool
-                @tool
-                def search_pdf(query: str) -> str:
-                    """Search the PDF for answers."""
-                    docs = retriever.invoke(query)
-                    return "\n\n".join([d.page_content for d in docs])
-
-                # 4. Agent
-                llm = ChatGroq(model="llama-3.1-8b-instant", api_key=groq_api_key)
-                agent = create_react_agent(llm, [search_pdf])
-
-                # 5. Run
-                response = agent.invoke({"messages": [("user", user_query)]})
-                
-                # Show Answer
-                st.markdown(f"### 🤖 AI Answer:")
-                st.write(response['messages'][-1].content)
-
-            except Exception as e:
-                st.error(f"Error: {e}")
-else:
-    st.info("👈 Please paste your API Key and upload a PDF to start.")
+    if user_question:
+        # Use the NEW working model
+        llm = ChatGroq(model_name="llama-3.3-70b-versatile")
+        
+        # Setup the Q&A Chain
+        qa_chain = RetrievalQA.from_chain_type(
+            llm=llm,
+            chain_type="stuff",
+            retriever=st.session_state.vectors.as_retriever()
+        )
+        
+        # Get the answer
+        response = qa_chain.invoke(user_question)
+        st.write(response["result"])
