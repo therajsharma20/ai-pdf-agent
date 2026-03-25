@@ -1,23 +1,22 @@
 import streamlit as st
 import os
+import chromadb
+import uuid
+from langchain_groq import ChatGroq
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_chroma import Chroma
+from langchain.chains import RetrievalQA
 
 # --- PAGE SETUP ---
 st.set_page_config(page_title="My AI Agent", page_icon="🤖")
 st.title("🤖 Chat with PDF")
 
-# --- IMPORT CHECK (To prove libraries are working) ---
-try:
-    from langchain_groq import ChatGroq
-    from langchain_community.document_loaders import PyPDFLoader
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
-    from langchain_community.embeddings import HuggingFaceEmbeddings
-    from langchain_chroma import Chroma
-    from langchain.chains import RetrievalQA
-    print("✅ All libraries imported successfully!")
-except ImportError as e:
-    st.error(f"❌ Library Error: {e}")
-    st.error("Did you run the 'pip install' command in cmd?")
-    st.stop()
+# --- INITIALIZE UPLOADER KEY ---
+# This is the magic trick to force the file uploader to clear itself
+if "file_uploader_key" not in st.session_state:
+    st.session_state["file_uploader_key"] = str(uuid.uuid4())
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -25,7 +24,26 @@ with st.sidebar:
     # Link to get the key if you forgot it
     st.markdown("[Get your Groq API Key](https://console.groq.com/keys)")
     api_key = st.text_input("Groq API Key", type="password")
-    uploaded_file = st.file_uploader("Upload PDF", type="pdf")
+    
+    # We pass the dynamic key to the uploader here
+    uploaded_file = st.file_uploader(
+        "Upload PDF", 
+        type="pdf", 
+        key=st.session_state["file_uploader_key"]
+    )
+    
+    # --- RESET BUTTON LOGIC ---
+    st.markdown("---") 
+    if st.button("🔄 Complete Reset / Clear Data"):
+        # 1. Wipe everything stored in Streamlit's memory
+        for key in list(st.session_state.keys()):
+            del st.session_state[key]
+        
+        # 2. Generate a brand NEW key for the uploader so it visually clears out
+        st.session_state["file_uploader_key"] = str(uuid.uuid4())
+        
+        # 3. Force the app to refresh instantly
+        st.rerun()
 
 # --- MAIN LOGIC ---
 if api_key and uploaded_file:
@@ -48,8 +66,18 @@ if api_key and uploaded_file:
         # Create the AI Brain (Embeddings)
         embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
         
-        # Store in Database (ChromaDB)
-        vector_store = Chroma.from_documents(documents=splits, embedding=embeddings)
+        # Clean the system cache to prevent ChromaDB crashes
+        chromadb.api.client.SharedSystemClient.clear_system_cache()
+
+        # Generate a totally unique name for the database to prevent data mixing
+        unique_collection_name = str(uuid.uuid4())
+
+        # Store in Database (ChromaDB) using the unique name
+        vector_store = Chroma.from_documents(
+            documents=splits, 
+            embedding=embeddings,
+            collection_name=unique_collection_name
+        )
         
         # Save to session so we don't reload it every time
         st.session_state.vectors = vector_store
@@ -57,20 +85,24 @@ if api_key and uploaded_file:
         st.rerun()
 
 # --- CHAT INTERFACE ---
-if "vectors" in st.session_state:
+# Only show the chat box IF the vectors exist in the session state
+if "vectors" in st.session_state and st.session_state.vectors is not None:
     user_question = st.text_input("Ask a question about the PDF:")
     
     if user_question:
-        # Use the NEW working model
+        # 1. Use the new working model
         llm = ChatGroq(model_name="llama-3.3-70b-versatile")
         
-        # Setup the Q&A Chain
+        # 2. Setup the Q&A Chain
         qa_chain = RetrievalQA.from_chain_type(
             llm=llm,
             chain_type="stuff",
             retriever=st.session_state.vectors.as_retriever()
         )
         
-        # Get the answer
+        # 3. Get the answer
         response = qa_chain.invoke(user_question)
         st.write(response["result"])
+else:
+    # If there are no vectors, tell them to upload
+    st.info("Please upload a PDF and wait for it to process before chatting.")
